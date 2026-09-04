@@ -3,8 +3,9 @@
 // standards (§15). Exit 1 on any failure.
 import { chromium } from "playwright";
 import http from "node:http";
-import { readFileSync, existsSync, statSync } from "node:fs";
+import { readFileSync, existsSync, statSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 const ROOT = process.cwd();
 const PORT = Number(process.env.PORT) || 8099;
@@ -50,6 +51,16 @@ const hook = (page) => {
   page.on("pageerror", (e) => errs.push(String(e)));
 };
 
+// A real, minimal 1x1 PNG -- readFile() must reach afterLoad() (which
+// reveals #btnClear) for the Clear round-trip below, so this needs to
+// actually decode, unlike a garbage-bytes fixture.
+const TINY_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+  "base64");
+const FIX = mkdtempSync(join(tmpdir(), "image-harness-"));
+const FIXTURE_PNG = join(FIX, "sample.png");
+writeFileSync(FIXTURE_PNG, TINY_PNG);
+
 // -- main context: light system scheme, full toggle round-trip
 const ctx = await browser.newContext({ colorScheme: "light", viewport: { width: 1240, height: 800 } });
 const page = await ctx.newPage();
@@ -82,7 +93,74 @@ check("icons in dark mode (moon shown, sun hidden)", await page.evaluate(() => {
 check("choice persists (mykk-bg)", await page.evaluate(() => { try { return localStorage.getItem("mykk-bg") === "#0d1117"; } catch (e) { return false; } }));
 await page.click("#themeToggle");
 check("toggle back to light", await page.evaluate(() => document.getElementById("bgPicker").value) === "#ffffff");
+
+// -- ?name=: loading a file reflects its name into the URL, Clear removes it
+await page.setInputFiles("#fileInput", FIXTURE_PNG);
+await page.waitForFunction(() => !document.getElementById("btnClear").hidden, null, { timeout: 10000 });
+check("load: URL reflects ?name=sample.png", await page.evaluate(() =>
+  new URLSearchParams(location.search).get("name")) === "sample.png");
+await page.click("#btnClear");
+check("clear: ?name= removed from the URL", await page.evaluate(() =>
+  new URLSearchParams(location.search).get("name")) === null);
 await ctx.close();
+
+// -- direct visit with ?name=: empty-state names the last-viewed file
+const p3 = await browser.newContext().then((c) => c.newPage());
+hook(p3);
+await p3.goto(`http://localhost:${PORT}/?name=${encodeURIComponent("sample.png")}`, { waitUntil: "load", timeout: 30000 });
+check("?name=: 'shared for' sub-line names the file", await p3.evaluate(() =>
+  /shared for/.test(document.querySelector(".empty-sub").textContent) &&
+  /sample\.png/.test(document.querySelector(".empty-sub").textContent)));
+await p3.context().close();
+
+// -- ?name= carrying markup renders as TEXT, never parsed as HTML (the read path)
+const p4 = await browser.newContext().then((c) => c.newPage());
+hook(p4);
+const HOSTILE_NAME = "<img src=x onerror=alert(1)>.png";
+await p4.goto(`http://localhost:${PORT}/?name=${encodeURIComponent(HOSTILE_NAME)}`, { waitUntil: "load", timeout: 30000 });
+check("?name=: hostile markup shows as literal text, never parsed", await p4.evaluate((name) => {
+  const sub = document.querySelector(".empty-sub");
+  return sub.textContent.includes(name) && sub.querySelector("img") === null;
+}, HOSTILE_NAME));
+await p4.context().close();
+
+// -- a hostile FILENAME on the error branch: showMsg() builds its card via
+// .innerHTML (stageMsg.innerHTML = '<div>...' + esc(sub) + ...), which is a
+// real sink that DOES receive the raw filename (reader.onerror calls
+// showMsg("Couldn't read the file", file.name)). This is the failure path a
+// hostile file is most likely to take, and it existed before this PR --
+// proving it stays safe here rather than assuming esc() is applied
+// everywhere it needs to be.
+const ctx5 = await browser.newContext();
+const p5 = await ctx5.newPage();
+hook(p5);
+const dialogs5 = [];
+p5.on("dialog", async (d) => { dialogs5.push(d.message()); await d.dismiss(); });
+// Force FileReader.readAsArrayBuffer to always error, so the real
+// reader.onerror -> showMsg(title, file.name) branch fires deterministically,
+// without needing a File that's genuinely unreadable.
+await p5.addInitScript(() => {
+  const OrigFR = window.FileReader;
+  window.FileReader = function () {
+    const r = new OrigFR();
+    r.readAsArrayBuffer = function () {
+      setTimeout(() => { if (typeof r.onerror === "function") r.onerror(new ProgressEvent("error")); }, 0);
+    };
+    return r;
+  };
+  window.FileReader.prototype = OrigFR.prototype;
+});
+await p5.goto(`http://localhost:${PORT}/`, { waitUntil: "load", timeout: 30000 });
+const HOSTILE_FILENAME = "<img src=x onerror=alert(1)>.png";
+const errFixture = join(FIX, HOSTILE_FILENAME);
+writeFileSync(errFixture, TINY_PNG);
+await p5.setInputFiles("#fileInput", errFixture);
+await p5.waitForFunction(() => !document.getElementById("stageMsg").hidden, null, { timeout: 10000 });
+check("error branch: hostile filename in showMsg() renders as literal text, never parsed, no alert", await p5.evaluate((name) => {
+  const stageMsg = document.getElementById("stageMsg");
+  return stageMsg.textContent.includes(name) && stageMsg.querySelector("img") === null;
+}, HOSTILE_FILENAME) && dialogs5.length === 0);
+await ctx5.close();
 
 // -- fresh context with dark system scheme: must default dark
 const ctx2 = await browser.newContext({ colorScheme: "dark" });
