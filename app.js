@@ -76,6 +76,11 @@
     return byext[e] || "unknown";
   }
 
+  // TIFF Compression tag (259) -> human name. Shared by decodeTIFF's skipped-page
+  // warning and the info panel, so the two cannot disagree about a codec name.
+  var TIFF_COMPRESSION={1:"None",2:"CCITT RLE",3:"CCITT G3",4:"CCITT G4",5:"LZW",
+    6:"JPEG (old)",7:"JPEG",8:"Deflate",32773:"PackBits",32946:"Deflate"};
+
   var DECODERS={ tiff:decodeTIFF, tga:decodeTGA, qoi:decodeQOI, pcx:decodePCX, pnm:decodePNM, farbfeld:decodeFarbfeld, dds:decodeDDS };
   var FMT_LABEL={png:"PNG",jpeg:"JPEG",gif:"GIF",webp:"WebP",avif:"AVIF",svg:"SVG",bmp:"BMP",ico:"ICO",tiff:"TIFF",tga:"TGA (Targa)",qoi:"QOI",pcx:"PCX",pnm:"Netpbm (PNM)",farbfeld:"farbfeld",dds:"DDS",psd:"Photoshop (PSD)",heic:"HEIC / HEIF",jxl:"JPEG XL",unknown:"Image"};
   var MIME={png:"image/png",jpeg:"image/jpeg",gif:"image/gif",webp:"image/webp",avif:"image/avif",svg:"image/svg+xml",bmp:"image/bmp",ico:"image/x-icon",heic:"image/heic",heif:"image/heif",jxl:"image/jxl"};
@@ -300,6 +305,7 @@
       catch(err){ routeOrMsg(file, "Couldn't decode "+meta.label, (err&&err.message)||String(err)); return; }
       if(!res||!res.pages||!res.pages.length){ routeOrMsg(file, "Couldn't decode "+meta.label, "No image data"); return; }
       buildDecoded(res,meta);
+      if(res.notice) toast(res.notice);   // partial decode: the page still renders
       return;
     }
     tryNative(file,buf,u8,meta,fmt);
@@ -552,28 +558,49 @@
     var buf=u8.buffer.slice(u8.byteOffset, u8.byteOffset+u8.byteLength);
     var ifds=self.UTIF.decode(buf);
     if(!ifds||!ifds.length) throw new Error("No TIFF images");
-    var pages=[], first=null;
+    // Pages the loop drops are counted, and the two reasons are kept apart: a
+    // decoder throw is a codec problem and names the codec, while missing
+    // dimensions or pixels is a layout problem and must not be reported as one.
+    var pages=[], first=null, lostCodec=[], lostEmpty=0;
     for(var i=0;i<ifds.length;i++){
       var ifd=ifds[i];
-      try{ self.UTIF.decodeImage(buf, ifd, ifds); }catch(e){ continue; }
+      try{ self.UTIF.decodeImage(buf, ifd, ifds); }
+      catch(e){ lostCodec.push(ifd.t259?ifd.t259[0]:1); continue; }
       var rgba=self.UTIF.toRGBA8(ifd);
       var w=ifd.width||ifd.t256&&ifd.t256[0], hh=ifd.height||ifd.t257&&ifd.t257[0];
-      if(!w||!hh||!rgba||!rgba.length) continue;
+      if(!w||!hh||!rgba||!rgba.length){ lostEmpty++; continue; }
       pages.push({w:w,h:hh,rgba:new Uint8ClampedArray(rgba.buffer||rgba)});
       if(!first) first=ifd;
     }
     if(!pages.length) throw new Error("Unsupported TIFF (compression or layout)");
+    // PARTIAL loss was previously silent: the document simply rendered short,
+    // which looks like success. Total loss already throws above and is honest.
+    var notice="";
+    var lost=lostCodec.length+lostEmpty;
+    if(lost){
+      var why=[];
+      if(lostCodec.length){
+        var seen={}, names=[];
+        for(var c=0;c<lostCodec.length;c++){
+          var nm=TIFF_COMPRESSION[lostCodec[c]]||("compression code "+lostCodec[c]);
+          if(!seen[nm]){ seen[nm]=1; names.push(nm); }
+        }
+        why.push("unsupported compression: "+names.join(", "));
+      }
+      if(lostEmpty) why.push(lostEmpty+" with no image data");
+      notice=lost+" of "+ifds.length+" pages could not be decoded — "+why.join("; ");
+    }
     var meta={};
     if(first){
       var bps=first.t258; meta.bitDepth=bps?(bps[0]||bps):8;
       meta.channels=bps&&bps.length?bps.length:undefined;
       var comp=first.t259?first.t259[0]:1;
-      meta.compression={1:"None",2:"CCITT RLE",3:"CCITT G3",4:"CCITT G4",5:"LZW",6:"JPEG (old)",7:"JPEG",8:"Deflate",32773:"PackBits",32946:"Deflate"}[comp]||("code "+comp);
+      meta.compression=TIFF_COMPRESSION[comp]||("code "+comp);
       var photo=first.t262?first.t262[0]:2;
       meta.colorType={0:"Grayscale (min-is-white)",1:"Grayscale",2:"RGB",3:"Indexed (palette)",5:"CMYK",6:"YCbCr"}[photo]||"—";
       var spp=first.t277?first.t277[0]:0; meta.alpha=(spp>=4)||(first.t338!=null);
     }
-    return {pages:pages, meta:meta};
+    return {pages:pages, meta:meta, notice:notice};
   }
 
   function decodeQOI(u8){
