@@ -170,6 +170,83 @@ await p2.goto(`http://localhost:${PORT}/`, { waitUntil: "load", timeout: 30000 }
 check("system-dark default (#0d1117)", await p2.evaluate(() => document.getElementById("bgPicker").value) === "#0d1117");
 await ctx2.close();
 
+// -- Partial TIFF decode must be REPORTED, not silent.
+//
+// A multi-page TIFF whose pages this build cannot decode used to render the
+// pages it could and say nothing, so the document came out short with no
+// signal -- a failure that looks like success. Total loss was always honest
+// (it throws "Unsupported TIFF (compression or layout)"); partial loss was
+// the gap.
+//
+// The TIFFs are built here rather than committed as binaries because the
+// thing under test IS the tag values -- which Compression code sits on which
+// page -- and that must be readable in review, not hidden in 284 bytes of
+// hex. Little-endian, uncompressed RGB strips, one IFD per page.
+const tiffOf = (pages) => {
+  const IFD = 2 + 10 * 12 + 4;                       // count + 10 entries + next-offset
+  const datas = pages.map((p) => Buffer.alloc(Math.max(0, p.w * p.h * 3), 0x80));
+  let cur = 8;
+  const at = pages.map((p, i) => { const o = { ifd: cur, data: cur + IFD }; cur += IFD + datas[i].length; return o; });
+  const out = Buffer.alloc(cur);
+  out.write("II", 0); out.writeUInt16LE(42, 2); out.writeUInt32LE(8, 4);
+  pages.forEach((p, i) => {
+    let o = at[i].ifd;
+    out.writeUInt16LE(10, o); o += 2;
+    const e = (tag, type, count, val) => {
+      out.writeUInt16LE(tag, o); out.writeUInt16LE(type, o + 2);
+      out.writeUInt32LE(count, o + 4); out.writeUInt32LE(val, o + 8); o += 12;
+    };
+    e(256, 3, 1, p.w);            // ImageWidth  — 0 here means "decodes, but no pixels"
+    e(257, 3, 1, p.h);            // ImageLength
+    e(258, 3, 3, 8);              // BitsPerSample
+    e(259, 3, 1, p.c);            // Compression — 1 = none, 8 = Deflate (needs pako)
+    e(262, 3, 1, 2);              // Photometric = RGB
+    e(273, 4, 1, at[i].data);     // StripOffsets
+    e(277, 3, 1, 3);              // SamplesPerPixel
+    e(278, 3, 1, p.h);            // RowsPerStrip
+    e(279, 4, 1, datas[i].length);// StripByteCounts
+    e(284, 3, 1, 1);              // PlanarConfiguration = chunky
+    out.writeUInt32LE(i + 1 < pages.length ? at[i + 1].ifd : 0, o);
+    datas[i].copy(out, at[i].data);
+  });
+  return out;
+};
+
+const tiffToast = async (name, pages) => {
+  const f = join(FIX, name);
+  writeFileSync(f, tiffOf(pages));
+  const pg = await browser.newContext().then((c) => c.newPage());
+  hook(pg);
+  await pg.goto(`http://localhost:${PORT}/`, { waitUntil: "load", timeout: 30000 });
+  await pg.setInputFiles("#fileInput", f);
+  await pg.waitForFunction(() => document.body.classList.contains("viewing"), null, { timeout: 15000 }).catch(() => {});
+  await pg.waitForTimeout(600);
+  const t = await pg.evaluate(() => document.getElementById("toast").textContent);
+  await pg.context().close();
+  return t;
+};
+
+const OK2 = [{ w: 2, h: 2, c: 1 }, { w: 2, h: 2, c: 1 }];
+check("TIFF: a Deflate page is reported, and names the codec",
+  await tiffToast("mixed.tif", [{ w: 2, h: 2, c: 1 }, { w: 2, h: 2, c: 8 }])
+    === "1 of 2 pages could not be decoded — unsupported compression: Deflate");
+
+// A page that decodes but yields no pixels is a LAYOUT fault. It must not be
+// reported as a compression problem — the two `continue`s are different bugs.
+check("TIFF: a zero-dimension page is not blamed on compression",
+  await tiffToast("zerodim.tif", [{ w: 2, h: 2, c: 1 }, { w: 0, h: 2, c: 1 }])
+    === "1 of 2 pages could not be decoded — 1 with no image data");
+
+check("TIFF: both failure kinds are counted and reported separately",
+  await tiffToast("both.tif", [{ w: 2, h: 2, c: 1 }, { w: 2, h: 2, c: 8 }, { w: 0, h: 2, c: 1 }])
+    === "2 of 3 pages could not be decoded — unsupported compression: Deflate; 1 with no image data");
+
+// THE CONTROL. Without this, a counter one off-by-one away from firing on
+// every file would still pass everything above — and a spurious warning reads
+// as a feature, so it would rot quietly.
+check("TIFF: a fully-decodable file produces NO message",
+  await tiffToast("ok.tif", OK2) === "");
+
 // -- static assertions
 const sz = (p) => (existsSync(join(ROOT, p)) ? statSync(join(ROOT, p)).size : 0);
 check("fonts present", sz("fonts/JetBrainsMono-Bold.subset.woff2") > 10000 && sz("fonts/JetBrainsMono-ExtraBold.subset.woff2") > 10000 && sz("fonts/OFL.txt") > 0);
