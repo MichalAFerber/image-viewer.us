@@ -70,7 +70,7 @@
     if(u8.length>=2 && u8[0]==0x50 && u8[1]>=0x31 && u8[1]<=0x37) return "pnm";
     if(u8.length>=2 && u8[0]==0xff && u8[1]==0x0a) return "jxl";
     if(u8.length>=2 && u8[0]==0x0a && (u8[2]==1||u8[2]==0) && e=="pcx") return "pcx";
-    var head=ascii(u8,0,Math.min(400,u8.length)).replace(/^﻿/,"");
+    var head=ascii(u8,0,Math.min(400,u8.length)).replace(/^\uFEFF/,"");
     if(/<svg[\s>]/i.test(head) || (/<\?xml/i.test(head) && /<svg[\s>]/i.test(ascii(u8,0,Math.min(3000,u8.length))))) return "svg";
     var byext={png:"png",jpg:"jpeg",jpeg:"jpeg",jpe:"jpeg",jfif:"jpeg",gif:"gif",webp:"webp",avif:"avif",svg:"svg",svgz:"svg",bmp:"bmp",dib:"bmp",ico:"ico",cur:"ico",tif:"tiff",tiff:"tiff",tga:"tga",targa:"tga",icb:"tga",vda:"tga",vst:"tga",qoi:"qoi",pcx:"pcx",ppm:"pnm",pgm:"pnm",pbm:"pnm",pnm:"pnm",pam:"pnm",ff:"farbfeld",dds:"dds",psd:"psd",heic:"heic",heif:"heic",jxl:"jxl"};
     return byext[e] || "unknown";
@@ -346,7 +346,7 @@
       ctx.putImageData(idata,0,0);
       pages.push({canvas:c,w:pg.w,h:pg.h});
     }
-    if(res.meta){ for(var k in res.meta){ if(res.meta.hasOwnProperty(k)) meta[k]=res.meta[k]; } }
+    if(res.meta){ for(var k in res.meta){ if(Object.prototype.hasOwnProperty.call(res.meta, k)) meta[k]=res.meta[k]; } }
     meta.width=pages[0].w; meta.height=pages[0].h; meta.frames=pages.length;
     view={ name:meta.name, fmt:meta.fmt, kind:"decoded", imgEl:null, pages:pages, pageIndex:0, meta:meta, blobUrl:null };
     showPage(0);
@@ -397,8 +397,8 @@
   stage.addEventListener("wheel", function(e){ if(!view) return; e.preventDefault(); var r=stage.getBoundingClientRect(); zoomAt(e.clientX-r.left,e.clientY-r.top, Math.pow(1.0016,-e.deltaY)); revealHeader(); }, {passive:false});
 
   var pointers={}, pinchPrev=0, dragLast=null;
-  function pcount(){ var n=0,k; for(k in pointers) if(pointers.hasOwnProperty(k)) n++; return n; }
-  function twoPts(){ var a=[],k; for(k in pointers){ if(pointers.hasOwnProperty(k)) a.push(pointers[k]); } return a; }
+  function pcount(){ var n=0,k; for(k in pointers) if(Object.prototype.hasOwnProperty.call(pointers, k)) n++; return n; }
+  function twoPts(){ var a=[],k; for(k in pointers){ if(Object.prototype.hasOwnProperty.call(pointers, k)) a.push(pointers[k]); } return a; }
   stage.addEventListener("pointerdown", function(e){ if(!view) return; try{stage.setPointerCapture(e.pointerId);}catch(x){} pointers[e.pointerId]={x:e.clientX,y:e.clientY}; var n=pcount(); if(n==1){ dragLast={x:e.clientX,y:e.clientY}; stage.classList.add("grabbing"); } else if(n==2){ var p=twoPts(); pinchPrev=Math.hypot(p[0].x-p[1].x,p[0].y-p[1].y); } });
   stage.addEventListener("pointermove", function(e){ if(!view){ return; } if(!pointers[e.pointerId]){ if(e.clientY<70) revealHeader(); return; } pointers[e.pointerId]={x:e.clientX,y:e.clientY}; var n=pcount(); if(n==1&&dragLast){ tx+=e.clientX-dragLast.x; ty+=e.clientY-dragLast.y; dragLast={x:e.clientX,y:e.clientY}; applyTransform(); } else if(n==2){ var p=twoPts(); var d=Math.hypot(p[0].x-p[1].x,p[0].y-p[1].y); if(pinchPrev>0){ var r=stage.getBoundingClientRect(); zoomAt((p[0].x+p[1].x)/2-r.left,(p[0].y+p[1].y)/2-r.top, d/pinchPrev); } pinchPrev=d; } });
   function endPtr(e){ if(pointers[e.pointerId]) delete pointers[e.pointerId]; var n=pcount(); if(n<2) pinchPrev=0; if(n==0){ dragLast=null; stage.classList.remove("grabbing"); } else { var p=twoPts(); dragLast={x:p[0].x,y:p[0].y}; } }
@@ -667,7 +667,7 @@
 
   function decodeTGA(u8){
     var idLen=u8[0], cmType=u8[1], imgType=u8[2];
-    var cmFirst=u8[3]|(u8[4]<<8), cmLen=u8[5]|(u8[6]<<8), cmDepth=u8[7];
+    var _cmFirst=u8[3]|(u8[4]<<8), cmLen=u8[5]|(u8[6]<<8), cmDepth=u8[7];
     var w=u8[12]|(u8[13]<<8), h=u8[14]|(u8[15]<<8), pxDepth=u8[16], desc=u8[17];
     if(!w||!h||w>32768||h>32768) throw new Error("Bad TGA dimensions");
     var topLeft=(desc&0x20)!=0;
@@ -693,8 +693,7 @@
     function sample(i){
       var off=i*bpp, r,g,b,a=255;
       if(baseType==1){ // color-mapped: index into palette
-        var idx=bpp==2?(raw[off]|(raw[off+1]<<8)):raw[off]; idx-=0; var co=(idx-0)*cmapBpp; // cmFirst offset already indexed from 0 typically; account cmFirst
-        co=(idx)*cmapBpp;
+        var idx=bpp==2?(raw[off]|(raw[off+1]<<8)):raw[off]; var co=(idx)*cmapBpp;
         if(cmapBpp==2){ var v=cmap[co]|(cmap[co+1]<<8); r=((v>>10)&31)*255/31|0; g=((v>>5)&31)*255/31|0; b=(v&31)*255/31|0; a=(v&0x8000)?255:255; }
         else if(cmapBpp==3){ b=cmap[co]; g=cmap[co+1]; r=cmap[co+2]; }
         else { b=cmap[co]; g=cmap[co+1]; r=cmap[co+2]; a=cmap[co+3]; }
