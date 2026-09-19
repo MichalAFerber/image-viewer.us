@@ -369,8 +369,9 @@
 </aside>
 
 <footer class="footer" id="footer">
-  <p>&copy; 2026 | Created with &#10084;&#65039; by <a href="https://michalferber.dev" target="_blank" rel="noopener noreferrer">Michal Ferber</a>, aka <a href="https://techguywithabeard.com" target="_blank" rel="noopener noreferrer">TechGuyWithABeard</a></p>
+  <p>&copy; <span id="footer-year">2026</span> | Created with &#10084;&#65039; by <a href="https://michalferber.dev/" target="_blank" rel="noopener">Michal Ferber</a>, aka <a href="https://techguywithabeard.com/" target="_blank" rel="noopener">TechGuyWithABeard</a>.</p>
 </footer>
+<script>document.getElementById('footer-year').textContent = new Date().getFullYear();</script>
 
 <div id="navBackdrop" class="nav-backdrop" aria-hidden="true"></div>
 <aside id="navPanel" class="nav-panel" aria-label="Site navigation">
